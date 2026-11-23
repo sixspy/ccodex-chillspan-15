@@ -7,8 +7,9 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release_and_commit, require_lock
 from models import BatchIn
+from same_source import verify_batch
 from validators import summarize_points, validate_probe_online, validate_temp_point
 
 router = APIRouter(tags=["batches"])
@@ -49,6 +50,11 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["temp_points"] = json.loads(d["temp_points"] or "[]")
+            if d["status"] == "已封批":
+                same = verify_batch(conn, r)
+                d["seal_checksum"] = same["seal_checksum"]
+                d["export_checksum"] = same["export_checksum"]
+                d["same_source"] = same["same_source"]
             items.append(d)
         return {"items": items}
 
@@ -76,10 +82,15 @@ def get_batch(batch_id: int, authorization: AuthHeader = None):
             "SELECT * FROM seal_snapshots WHERE batch_id=? ORDER BY id DESC",
             (batch_id,),
         ).fetchall()
+        same = verify_batch(conn, row)
+        data["seal_checksum"] = same["seal_checksum"]
+        data["export_checksum"] = same["export_checksum"]
+        data["same_source"] = same["same_source"]
         return {
             "batch": data,
             "excursions": [dict(e) for e in exc],
             "seals": [dict(s) for s in seals],
+            "same_source": same,
         }
 
 
@@ -155,4 +166,4 @@ def create_batch(body: BatchIn, authorization: AuthHeader = None):
                 "point_count": len(points),
             }
         finally:
-            release(conn, lock_key, user)
+            release_and_commit(conn, lock_key, user)

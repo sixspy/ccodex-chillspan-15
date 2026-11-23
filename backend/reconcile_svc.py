@@ -1,10 +1,11 @@
-"""仓间配额 vs 在批差额对账 + 互证只读。"""
+"""仓间配额 vs 在批差额对账 + 互证只读（五页同源口径）。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
 from db import connect
+from same_source import verify_batch
 
 router = APIRouter(tags=["reconcile"])
 
@@ -72,7 +73,7 @@ def reconcile_one(chamber_code: str, authorization: AuthHeader = None):
 
 @router.get("/api/proof/batch/{batch_code}")
 def batch_proof(batch_code: str, authorization: AuthHeader = None):
-    """批次互证：封批代 + 温谱导出 + 开放游标。"""
+    """批次互证：封批代 + 温谱导出 + 开放游标 + 同源摘要。"""
     require_user(authorization)
     with connect() as conn:
         batch = conn.execute(
@@ -85,13 +86,14 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
                WHERE batch_id=? AND status='开放'""",
             (batch["id"],),
         ).fetchone()["c"]
+        same = verify_batch(conn, batch)
+        sealed = batch["status"] == "已封批"
         exports = conn.execute(
             """SELECT COUNT(*) c FROM spectrum_exports
                WHERE batch_id=? AND status='已导出'""",
             (batch["id"],),
         ).fetchone()["c"]
-        sealed = batch["status"] == "已封批"
-        spectrum_ok = (exports >= 1) if sealed else True
+        spectrum_ok = same["same_source"] and (exports >= 1 if sealed else True)
         return {
             "batch_code": batch_code,
             "status": batch["status"],
@@ -101,10 +103,34 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
             "sealed": sealed,
             "excursion_closed": open_exc == 0,
             "spectrum_matches_seal": spectrum_ok,
+            "same_source": same,
             "proof": {
-                "formula": "sealed => spectrum>=1 and open_excursions==0",
+                "formula": "sealed => spectrum>=1 and open_excursions==0 and 同源摘要一致",
                 "sealed": sealed,
                 "open_excursions": open_exc,
                 "exports": exports,
+                "same_source": same["same_source"],
+            },
+        }
+
+
+@router.get("/api/same-source")
+def same_source_overview(authorization: AuthHeader = None):
+    """五页同源总览：封批页、温谱页、批次页、对账页、血缘页共用的账实口径。"""
+    require_user(authorization)
+    with connect() as conn:
+        batches = conn.execute(
+            "SELECT * FROM temp_batches ORDER BY id"
+        ).fetchall()
+        items = [verify_batch(conn, b) for b in batches]
+        drifted = [i for i in items if not i["same_source"]]
+        return {
+            "policy": "甲",
+            "items": items,
+            "summary": {
+                "total": len(items),
+                "same_source": len(items) - len(drifted),
+                "drifted": len(drifted),
+                "drifted_batches": [i["batch_code"] for i in drifted],
             },
         }

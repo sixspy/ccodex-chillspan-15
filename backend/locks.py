@@ -1,6 +1,8 @@
 """仓间锁与争用登记（公共并发面）。"""
 from __future__ import annotations
 
+import sqlite3
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -15,24 +17,35 @@ class LockIn(BaseModel):
     action: str = "acquire"
 
 
+def _log_contention(conn, lock_key: str, holder: str, current: str) -> None:
+    conn.execute(
+        """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
+           VALUES (?,?,?,?,?)""",
+        (lock_key, holder, "争用", f"持有者={current}", now_iso()),
+    )
+
+
 def try_acquire(conn, lock_key: str, holder: str) -> bool:
+    """原子抢锁：主键冲突即争用，只留痕不写业务。"""
     now = now_iso()
     row = conn.execute(
         "SELECT holder FROM chamber_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
+    if row is not None and row["holder"] == holder:
+        return True
     if row is None:
-        conn.execute(
-            "INSERT INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
-        )
-        return True
-    if row["holder"] == holder:
-        return True
-    conn.execute(
-        """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
-           VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
-    )
+        try:
+            conn.execute(
+                "INSERT INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+                (lock_key, holder, now),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT holder FROM chamber_locks WHERE lock_key=?", (lock_key,)
+            ).fetchone()
+    current = row["holder"] if row is not None else "未知"
+    _log_contention(conn, lock_key, holder, current)
     return False
 
 
@@ -45,7 +58,17 @@ def release(conn, lock_key: str, holder: str) -> None:
 
 def require_lock(conn, lock_key: str, holder: str) -> None:
     if not try_acquire(conn, lock_key, holder):
+        # 争用留痕须落库：异常回滚前先提交争用日志。
+        conn.commit()
         raise HTTPException(409, "争用：后到只记争用，不写业务")
+    # 抢到的锁先落库：业务失败回滚时锁仍在，须由 finally 显式释放。
+    conn.commit()
+
+
+def release_and_commit(conn, lock_key: str, holder: str) -> None:
+    """释放锁并立即提交，避免异常路径回滚把释放一起撤销而锁泄漏。"""
+    release(conn, lock_key, holder)
+    conn.commit()
 
 
 @router.get("/api/locks")

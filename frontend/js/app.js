@@ -57,6 +57,7 @@ createApp({
     const reconOne = ref(null);
     const proofOne = ref(null);
     const reconAllItems = ref([]);
+    const sameSourceSummary = ref(null);
     const reconCode = ref("CK-HD-01");
     const proofCode = ref("TB-CK-HD-01-002");
 
@@ -400,6 +401,16 @@ createApp({
         flashErr(e);
       }
     }
+    async function loadSameSource() {
+      clearFlash();
+      try {
+        const r = await api.sameSource();
+        sameSourceSummary.value = r.summary || null;
+        flashOk("同源总览已刷新");
+      } catch (e) {
+        flashErr(e);
+      }
+    }
 
     async function addCalibration() {
       clearFlash();
@@ -479,6 +490,7 @@ createApp({
       reconAllItems,
       reconCode,
       proofCode,
+      sameSourceSummary,
       chamberForm,
       probeForm,
       batchForm,
@@ -519,6 +531,7 @@ createApp({
       loadRecon,
       loadProof,
       loadReconAll,
+      loadSameSource,
       addCalibration,
       createRoute,
       doCarrierStub,

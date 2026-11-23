@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release_and_commit, require_lock
 from models import ExcursionCloseIn, ExcursionOpenIn
 from validators import detect_excursion
 
@@ -80,7 +80,7 @@ def open_excursion(body: ExcursionOpenIn, authorization: AuthHeader = None):
             conn.commit()
             return {"id": cur.lastrowid, "cursor_key": key, "peak_temp": peak, "status": "开放"}
         finally:
-            release(conn, lock_key, user)
+            release_and_commit(conn, lock_key, user)
 
 
 @router.post("/api/excursions/close")

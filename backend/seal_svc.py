@@ -7,8 +7,9 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release_and_commit, require_lock
 from models import SealIn
+from same_source import checksum_for, points_of
 from validators import require_calibration_fresh, validate_batch_sealable
 
 router = APIRouter(tags=["seal"])
@@ -19,10 +20,25 @@ def list_seals(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT s.*, b.batch_code FROM seal_snapshots s
+            """SELECT s.*, b.batch_code, b.generation, b.temp_points
+               FROM seal_snapshots s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["points"] = points_of(d)
+            d["computed_checksum"] = checksum_for(
+                d["batch_code"], d["batch_generation"], d["points"]
+            )
+            d["same_source"] = bool(d["checksum"]) and (
+                d["checksum"] == d["computed_checksum"]
+                and int(d["batch_generation"]) == int(d["generation"])
+            )
+            d.pop("temp_points", None)
+            d.pop("points", None)
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/seals")
@@ -61,10 +77,11 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
                 ensure_ascii=False,
             )
             now = now_iso()
+            checksum = checksum_for(batch["batch_code"], gen + 1, points_of(batch))
             cur = conn.execute(
-                """INSERT INTO seal_snapshots(batch_id,batch_generation,manifest,status,sealed_at)
-                   VALUES (?,?,?,?,?)""",
-                (body.batch_id, gen + 1, manifest, "已封批", now),
+                """INSERT INTO seal_snapshots(batch_id,batch_generation,manifest,
+                   checksum,status,sealed_at) VALUES (?,?,?,?,?,?)""",
+                (body.batch_id, gen + 1, manifest, checksum, "已封批", now),
             )
             conn.execute(
                 """UPDATE temp_batches SET status='已封批', generation=generation+1,
@@ -76,14 +93,15 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
                 user,
                 "batch_seal",
                 batch["batch_code"],
-                {"seal_id": cur.lastrowid, "generation": gen + 1},
+                {"seal_id": cur.lastrowid, "generation": gen + 1, "checksum": checksum},
             )
             conn.commit()
             return {
                 "seal_id": cur.lastrowid,
                 "batch_code": batch["batch_code"],
                 "generation": gen + 1,
+                "checksum": checksum,
                 "status": "已封批",
             }
         finally:
-            release(conn, lock_key, user)
+            release_and_commit(conn, lock_key, user)

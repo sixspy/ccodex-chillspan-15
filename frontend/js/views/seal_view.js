@@ -1,7 +1,7 @@
 export const sealViewTemplate = `
 <section class="panel">
   <h2>封批升代</h2>
-  <p class="hint">校准有效且无开放游标时方可封批。</p>
+  <p class="hint">校准有效且无开放游标时方可封批；快照校验和与温谱导出同源。</p>
   <div class="form-row">
     <div><label>批次</label>
       <select v-model.number="sealForm.batch_id"><option v-for="b in sealableBatches" :key="b.id" :value="b.id">{{ b.batch_code }}</option></select>
@@ -10,12 +10,14 @@ export const sealViewTemplate = `
   </div>
   <div class="actions"><button @click="doSeal">执行封批</button></div>
   <table class="data-table">
-    <thead><tr><th>批次</th><th>代</th><th>封批时间</th><th>附言摘要</th></tr></thead>
+    <thead><tr><th>批次</th><th>代</th><th>封批时间</th><th>快照校验和</th><th>同源</th><th>附言摘要</th></tr></thead>
     <tbody>
       <tr v-for="s in seals" :key="s.id">
         <td>{{ s.batch_code }}</td>
         <td>{{ s.batch_generation }}</td>
         <td>{{ s.sealed_at }}</td>
+        <td class="mono">{{ s.checksum || "—" }}</td>
+        <td><span class="badge" :class="s.same_source ? 'pass' : 'fail'">{{ s.same_source ? "同源" : "同源偏航" }}</span></td>
         <td>{{ shortText(s.manifest) }}</td>
       </tr>
     </tbody>

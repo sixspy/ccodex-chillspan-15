@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS seal_snapshots(
   batch_id INTEGER NOT NULL,
   batch_generation INTEGER NOT NULL,
   manifest TEXT NOT NULL,
+  checksum TEXT,
   status TEXT NOT NULL,
   sealed_at TEXT NOT NULL,
   FOREIGN KEY(batch_id) REFERENCES temp_batches(id)
@@ -398,6 +399,57 @@ def seed_lineage_samples(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_same_source(conn: sqlite3.Connection) -> None:
+    """旧库补 checksum 列；为存量封批快照回填同源摘要。
+
+    已存在的温谱导出摘要不回写：若与快照不同源，互证会如实判为偏航并拒写。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(seal_snapshots)")}
+    if "checksum" not in cols:
+        conn.execute("ALTER TABLE seal_snapshots ADD COLUMN checksum TEXT")
+
+    from same_source import checksum_for, points_of
+
+    sealed = conn.execute(
+        "SELECT * FROM temp_batches WHERE status='已封批' ORDER BY id"
+    ).fetchall()
+    for batch in sealed:
+        snap = conn.execute(
+            "SELECT * FROM seal_snapshots WHERE batch_id=? ORDER BY id DESC LIMIT 1",
+            (batch["id"],),
+        ).fetchone()
+        digest = checksum_for(
+            batch["batch_code"], batch["generation"], points_of(batch)
+        )
+        if snap is None:
+            conn.execute(
+                """INSERT INTO seal_snapshots(batch_id,batch_generation,manifest,
+                   checksum,status,sealed_at) VALUES (?,?,?,?,?,?)""",
+                (
+                    batch["id"],
+                    batch["generation"],
+                    json.dumps(
+                        {
+                            "batch_code": batch["batch_code"],
+                            "generation": batch["generation"],
+                            "point_count": len(points_of(batch)),
+                            "min": batch["min_observed"],
+                            "max": batch["max_observed"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    digest,
+                    "已封批",
+                    batch["sealed_at"] or now_iso(),
+                ),
+            )
+        elif not snap["checksum"]:
+            conn.execute(
+                "UPDATE seal_snapshots SET checksum=? WHERE id=?",
+                (digest, snap["id"]),
+            )
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
@@ -409,6 +461,8 @@ def init_db() -> None:
         seed_calibrations(conn)
         seed_routes(conn)
         seed_lineage_samples(conn)
+        # 建表/落种子后再回填存量封批快照摘要，种子数据也纳入同源口径。
+        _migrate_same_source(conn)
         conn.commit()
 
 
